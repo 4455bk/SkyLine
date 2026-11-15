@@ -2,7 +2,9 @@
 #include "state.h"
 
 #include <d3d11.h>
-#include <dxgi.h>
+#include <d3d11on12.h>
+#include <d3d12.h>
+#include <dxgi1_4.h>
 
 // Present hook that blends the overlay's premultiplied box into the back buffer, saving and restoring the state it touches.
 // No ID3DDeviceContextState: creating one makes RTSS see a D3D10 device for the rest of the run, and its overlay stays hidden.
@@ -17,6 +19,25 @@ namespace
 
 	std::atomic<bool>          stopped = false;
 	std::atomic<std::int64_t>  lastPresentMs = 0;
+
+	// A swapchain wrapper whose buffer 0 isn't the swapchain's size (an upscaler's render-size input) never shows what is drawn there.
+	// Then the status goes in at DXGI's own Present, into the image the wrapper presents.
+	enum class Route
+	{
+		Unknown,  // not checked yet
+		Game,     // the game's back buffer, as usual
+		Waiting,  // DXGI's Present slot being looked up
+		Inner,    // DXGI's Present hooked
+	};
+	Route                  route = Route::Unknown;  // render thread only
+	std::atomic<void**>    innerSlot = nullptr;     // set by the lookup thread
+	std::atomic<bool>      innerLookupDone = false;
+	Present_t              innerPresent = nullptr;
+	IDXGISwapChain*        innerChain = nullptr;    // render thread only
+	bool                   inGamePresent = false;   // render thread only
+	std::atomic<DWORD>     renderThread = 0;        // the thread calling the game's Present
+	bool                   innerReached = false;    // render thread only
+	int                    framesWithoutInner = 0;  // render thread only
 
 	// The game's swapchain gets its own copy of its vtable with Present replaced. Writing the shared table instead lets an
 	// overlay that hooks Present again later (Steam's does) detour our function and call itself in a loop.
@@ -34,6 +55,8 @@ namespace
 	// Render thread only.
 	ID3D11Device*             device = nullptr;
 	ID3D11DeviceContext*      context = nullptr;
+	ID3D11On12Device*         on12 = nullptr;  // set when the swapchain is D3D12, its back buffers get wrapped per frame
+	ID3D12CommandQueue*       presentQueue = nullptr;  // referenced, the queue D3D11On12 submits on
 	ID3D11VertexShader*       vs = nullptr;
 	ID3D11PixelShader*        psSrgb = nullptr;    // back buffer stores sRGB-encoded values: write as is
 	ID3D11PixelShader*        psLinear = nullptr;  // _SRGB views and scRGB float: convert to linear
@@ -91,7 +114,12 @@ float4 ps(V i) : SV_Target
 		SafeRelease(psLinear);
 		SafeRelease(psSrgb);
 		SafeRelease(vs);
+		if (context && on12) {
+			context->Flush();
+		}
 		SafeRelease(context);
+		SafeRelease(on12);
+		SafeRelease(presentQueue);
 		SafeRelease(device);
 	}
 
@@ -120,12 +148,100 @@ float4 ps(V i) : SV_Target
 		return code;
 	}
 
+	// The queue the D3D12 swapchain presents on, when it doesn't report one: the last direct queue the game's thread submitted to
+	// inside the game's Present, which is where a wrapper copies its image into the swapchain. Render thread only.
+	ID3D12CommandQueue* submittedQueue = nullptr;  // not referenced, reset each game Present
+	bool                loggedQueueChange = false;
+
+	using Execute_t = void(STDMETHODCALLTYPE*)(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*);
+	Execute_t originalExecute = nullptr;
+
+	void STDMETHODCALLTYPE HookedExecute(ID3D12CommandQueue* a_queue, UINT a_count, ID3D12CommandList* const* a_lists)
+	{
+		if (GetCurrentThreadId() == renderThread && inGamePresent && a_queue->GetDesc().Type == D3D12_COMMAND_LIST_TYPE_DIRECT) {
+			submittedQueue = a_queue;
+		}
+		originalExecute(a_queue, a_count, a_lists);
+	}
+
+	// Hooks ExecuteCommandLists in the D3D12 queue vtable, found from a throwaway queue. It stays a pass-through after startup.
+	void HookExecute(ID3D12Device* a_device)
+	{
+		if (originalExecute) {
+			return;
+		}
+		ID3D12CommandQueue*      dummy = nullptr;
+		D3D12_COMMAND_QUEUE_DESC desc{};
+		desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+		if (FAILED(a_device->CreateCommandQueue(&desc, __uuidof(ID3D12CommandQueue), reinterpret_cast<void**>(&dummy)))) {
+			logger::warn("[{:6.1f} s] No D3D12 queue for the submit hook, status not drawn into frames", Status::Uptime());
+			return;
+		}
+		auto** slot = &(*reinterpret_cast<void***>(dummy))[10];  // ID3D12CommandQueue::ExecuteCommandLists
+		DWORD  old = 0;
+		if (VirtualProtect(slot, sizeof(void*), PAGE_EXECUTE_READWRITE, &old)) {
+			originalExecute = reinterpret_cast<Execute_t>(*slot);
+			InterlockedExchangePointer(slot, reinterpret_cast<void*>(&HookedExecute));
+			VirtualProtect(slot, sizeof(void*), old, &old);
+			logger::info("[{:6.1f} s] D3D12 swapchain reports no queue, ExecuteCommandLists hooked to find the one it presents on", Status::Uptime());
+		}
+		dummy->Release();
+	}
+
+	// A D3D11On12 device on the D3D12 swapchain's queue lets the same drawing code run. False until that queue is known.
+	bool InitOn12(IDXGISwapChain* a_swapChain)
+	{
+		using Create_t = decltype(&D3D11On12CreateDevice);
+		const auto          create = reinterpret_cast<Create_t>(GetProcAddress(GetModuleHandleW(L"d3d11.dll"), "D3D11On12CreateDevice"));
+		ID3D12CommandQueue* queue = nullptr;
+		ID3D12Device*       device12 = nullptr;
+		if (SUCCEEDED(a_swapChain->GetDevice(__uuidof(ID3D12CommandQueue), reinterpret_cast<void**>(&queue)))) {
+			queue->GetDevice(__uuidof(ID3D12Device), reinterpret_cast<void**>(&device12));
+		} else if (SUCCEEDED(a_swapChain->GetDevice(__uuidof(ID3D12Device), reinterpret_cast<void**>(&device12)))) {
+			HookExecute(device12);
+			if (submittedQueue) {
+				queue = submittedQueue;
+				queue->AddRef();
+			}
+		}
+		bool ok = create && queue && device12;
+		if (ok) {
+			IUnknown*  queues[] = { queue };
+			const auto hr = create(device12, 0, nullptr, 0, queues, 1, 0, &device, &context, nullptr);
+			if (FAILED(hr)) {
+				logger::warn("D3D11On12CreateDevice failed {:08X}", static_cast<std::uint32_t>(hr));
+			}
+			ok = SUCCEEDED(hr) && SUCCEEDED(device->QueryInterface(__uuidof(ID3D11On12Device), reinterpret_cast<void**>(&on12)));
+		}
+		SafeRelease(device12);
+		if (ok) {
+			presentQueue = queue;
+			logger::info("[{:6.1f} s] Swapchain is D3D12, drawing through D3D11On12", Status::Uptime());
+		} else {
+			SafeRelease(queue);
+		}
+		return ok;
+	}
+
+	// D3D12 without a known queue yet: try again next frame instead of giving up.
+	bool waitingForQueue = false;
+
 	bool Init(IDXGISwapChain* a_swapChain)
 	{
-		if (FAILED(a_swapChain->GetDevice(__uuidof(ID3D11Device), reinterpret_cast<void**>(&device)))) {
+		waitingForQueue = false;
+		if (SUCCEEDED(a_swapChain->GetDevice(__uuidof(ID3D11Device), reinterpret_cast<void**>(&device)))) {
+			device->GetImmediateContext(&context);
+		} else if (!InitOn12(a_swapChain)) {
+			ID3D12Device* device12 = nullptr;
+			if (originalExecute && SUCCEEDED(a_swapChain->GetDevice(__uuidof(ID3D12Device), reinterpret_cast<void**>(&device12)))) {
+				device12->Release();
+				waitingForQueue = true;
+			} else {
+				logger::warn("Swapchain has neither a D3D11 device nor a D3D12 queue, status not drawn into frames");
+			}
+			ReleaseAll();
 			return false;
 		}
-		device->GetImmediateContext(&context);
 		const D3D_FEATURE_LEVEL level = device->GetFeatureLevel();
 		auto* vsCode = Compile("vs", "vs_4_0", false);
 		auto* psCode = Compile("ps", "ps_4_0", false);
@@ -268,13 +384,48 @@ float4 ps(V i) : SV_Target
 		}
 	};
 
+	// The current back buffer as a D3D11 texture. A D3D12 one is wrapped and must go back through ReleaseBack.
+	ID3D11Texture2D* AcquireBack(IDXGISwapChain* a_swapChain)
+	{
+		ID3D11Texture2D* back = nullptr;
+		if (!on12) {
+			a_swapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&back));
+			return back;
+		}
+		IDXGISwapChain3* chain3 = nullptr;
+		ID3D12Resource*  resource = nullptr;
+		if (SUCCEEDED(a_swapChain->QueryInterface(__uuidof(IDXGISwapChain3), reinterpret_cast<void**>(&chain3))) &&
+			SUCCEEDED(chain3->GetBuffer(chain3->GetCurrentBackBufferIndex(), __uuidof(ID3D12Resource), reinterpret_cast<void**>(&resource)))) {
+			const D3D11_RESOURCE_FLAGS flags{ D3D11_BIND_RENDER_TARGET, 0, 0, 0 };
+			if (SUCCEEDED(on12->CreateWrappedResource(resource, &flags, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_PRESENT,
+					__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&back)))) {
+				ID3D11Resource* wrapped = back;
+				on12->AcquireWrappedResources(&wrapped, 1);
+			}
+		}
+		SafeRelease(resource);
+		SafeRelease(chain3);
+		return back;
+	}
+
+	// Hands a wrapped D3D12 buffer back in the present state and submits the draw before the swapchain presents.
+	void ReleaseBack(ID3D11Texture2D*& a_back)
+	{
+		if (a_back && on12) {
+			ID3D11Resource* wrapped = a_back;
+			on12->ReleaseWrappedResources(&wrapped, 1);
+			context->Flush();
+		}
+		SafeRelease(a_back);
+	}
+
 	void Draw(IDXGISwapChain* a_swapChain)
 	{
 		if (failed) {
 			return;
 		}
 		if (!device && !Init(a_swapChain)) {
-			failed = true;
+			failed = !waitingForQueue;
 			ReleaseAll();
 			return;
 		}
@@ -310,8 +461,8 @@ float4 ps(V i) : SV_Target
 			return;
 		}
 
-		ID3D11Texture2D* back = nullptr;
-		if (FAILED(a_swapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&back)))) {
+		ID3D11Texture2D* back = AcquireBack(a_swapChain);
+		if (!back) {
 			return;
 		}
 		D3D11_TEXTURE2D_DESC bd{};
@@ -323,7 +474,7 @@ float4 ps(V i) : SV_Target
 				loggedFormat = true;
 				logger::warn("Back buffer format {} not handled, status not drawn into frames", static_cast<int>(bd.Format));
 			}
-			back->Release();
+			ReleaseBack(back);
 			return;
 		}
 		// The RTV is made per frame and released before Present, a held back buffer reference would make ResizeBuffers fail.
@@ -360,7 +511,7 @@ float4 ps(V i) : SV_Target
 			game.Restore();
 			rtv->Release();
 		}
-		back->Release();
+		ReleaseBack(back);
 	}
 
 	// An exclusive fullscreen or D3D12 output can hide the child window, this tells which one a report is about.
@@ -376,8 +527,117 @@ float4 ps(V i) : SV_Target
 			static_cast<int>(desc.SwapEffect), fullscreen != FALSE, GetModuleHandleW(L"d3d12.dll") != nullptr ? "loaded" : "not loaded");
 	}
 
+	// The Steam overlay calls Present again through the slot from inside its own hook, nested calls only pass through.
+	thread_local bool insideInner = false;
+
+	HRESULT STDMETHODCALLTYPE InnerPresent(IDXGISwapChain* a_swapChain, UINT a_sync, UINT a_flags)
+	{
+		const bool entered = !insideInner;
+		insideInner = true;
+		// Only inside the game's Present, so other swapchains and the wrapper's own extra presents are left alone.
+		if (entered && inGamePresent && !stopped && !(a_flags & DXGI_PRESENT_TEST)) {
+			if (!innerChain) {
+				innerChain = a_swapChain;
+				logger::info("[{:6.1f} s] Drawing into frames at DXGI's Present, after the swapchain wrapper", Status::Uptime());
+			}
+			if (a_swapChain == innerChain) {
+				innerReached = true;
+				if (presentQueue && submittedQueue && submittedQueue != presentQueue && !loggedQueueChange) {
+					loggedQueueChange = true;
+					logger::warn("[{:6.1f} s] The last queue submitted to before Present changed, drawing may be out of order", Status::Uptime());
+				}
+				Draw(a_swapChain);
+			}
+		}
+		const auto hr = innerPresent(a_swapChain, a_sync, a_flags);
+		if (entered) {
+			insideInner = false;
+		}
+		return hr;
+	}
+
+	// Finds Present's slot in DXGI's swapchain vtable from a throwaway swapchain made with the system d3d11.dll. It can take seconds, so it runs apart.
+	void LookUpInner()
+	{
+		wchar_t system[MAX_PATH]{};
+		GetSystemDirectoryW(system, MAX_PATH);
+		const auto d3d11 = LoadLibraryW((std::filesystem::path(system) / L"d3d11.dll").c_str());
+		const auto create = d3d11 ? reinterpret_cast<PFN_D3D11_CREATE_DEVICE_AND_SWAP_CHAIN>(GetProcAddress(d3d11, "D3D11CreateDeviceAndSwapChain")) : nullptr;
+		const auto window = CreateWindowExW(0, L"STATIC", L"", WS_POPUP, 0, 0, 8, 8, nullptr, nullptr, nullptr, nullptr);
+		IDXGISwapChain*      chain = nullptr;
+		ID3D11Device*        dummy = nullptr;
+		ID3D11DeviceContext* dummyContext = nullptr;
+		if (create && window) {
+			DXGI_SWAP_CHAIN_DESC desc{};
+			desc.BufferCount = 1;
+			desc.BufferDesc.Width = 8;
+			desc.BufferDesc.Height = 8;
+			desc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+			desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+			desc.OutputWindow = window;
+			desc.SampleDesc.Count = 1;
+			desc.Windowed = TRUE;
+			desc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+			create(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &desc, &chain, &dummy, nullptr, &dummyContext);
+		}
+		if (chain) {
+			innerSlot = &(*reinterpret_cast<void***>(chain))[8];
+		}
+		SafeRelease(chain);
+		SafeRelease(dummyContext);
+		SafeRelease(dummy);
+		if (window) {
+			DestroyWindow(window);
+		}
+		innerLookupDone = true;
+	}
+
+	// Compares buffer 0 with the swapchain's own size, once, on the game's thread.
+	void CheckRoute(IDXGISwapChain* a_swapChain)
+	{
+		route = Route::Game;
+		DXGI_SWAP_CHAIN_DESC desc{};
+		ID3D11Texture2D*     back = nullptr;
+		if (FAILED(a_swapChain->GetDesc(&desc)) ||
+			FAILED(a_swapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&back)))) {
+			return;
+		}
+		D3D11_TEXTURE2D_DESC bd{};
+		back->GetDesc(&bd);
+		back->Release();
+		if (bd.Width == desc.BufferDesc.Width && bd.Height == desc.BufferDesc.Height) {
+			return;
+		}
+		logger::info("[{:6.1f} s] Back buffer {}x{} isn't the swapchain's {}x{}, a wrapper presents another image, looking up DXGI's Present",
+			Status::Uptime(), bd.Width, bd.Height, desc.BufferDesc.Width, desc.BufferDesc.Height);
+		route = Route::Waiting;
+		std::thread(LookUpInner).detach();
+	}
+
+	// The slot write, on the game's thread, once the lookup is done.
+	void InstallInner()
+	{
+		auto** slot = innerSlot.load();
+		DWORD  old = 0;
+		if (!slot || !VirtualProtect(slot, sizeof(void*), PAGE_EXECUTE_READWRITE, &old)) {
+			logger::warn("[{:6.1f} s] DXGI's Present not found, status drawn into the wrapper's buffer", Status::Uptime());
+			route = Route::Game;
+			return;
+		}
+		innerPresent = reinterpret_cast<Present_t>(*slot);
+		InterlockedExchangePointer(slot, reinterpret_cast<void*>(&InnerPresent));
+		VirtualProtect(slot, sizeof(void*), old, &old);
+		route = Route::Inner;
+		logger::info("[{:6.1f} s] DXGI Present hooked", Status::Uptime());
+	}
+
 	HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain* a_swapChain, UINT a_sync, UINT a_flags)
 	{
+		// Follows the shared slot, so a mod that hooks it after us still runs for the game's swapchain.
+		auto next = reinterpret_cast<Present_t>(sharedVtable[8]);
+		if (next == &HookedPresent) {
+			next = originalPresent;
+		}
 		if (!(a_flags & DXGI_PRESENT_TEST)) {
 			if (!stopped) {
 				if (!loggedSwapChain) {
@@ -385,18 +645,38 @@ float4 ps(V i) : SV_Target
 					LogSwapChain(a_swapChain);
 				}
 				lastPresentMs = static_cast<std::int64_t>(Status::Uptime() * 1000.0);
-				Draw(a_swapChain);
+				if (route == Route::Unknown) {
+					CheckRoute(a_swapChain);
+				}
+				if (route == Route::Waiting && innerLookupDone) {
+					InstallInner();
+				}
+				if (route == Route::Game) {
+					Draw(a_swapChain);
+				} else if (route == Route::Inner) {
+					renderThread = GetCurrentThreadId();
+					inGamePresent = true;
+					innerReached = false;
+					submittedQueue = nullptr;
+					const auto hr = next(a_swapChain, a_sync, a_flags);
+					inGamePresent = false;
+					framesWithoutInner = innerReached ? 0 : framesWithoutInner + 1;
+					if (framesWithoutInner >= 3) {
+						// The slot stays hooked, it only passes through from here.
+						logger::warn("[{:6.1f} s] DXGI's Present not reached for 3 frames, status drawn into the wrapper's buffer", Status::Uptime());
+						route = Route::Game;
+						ReleaseAll();
+						failed = false;
+						textureVersion = 0;
+					}
+					return hr;
+				}
 			} else if (!released) {
 				// The swapchain keeps our vtable: a mod may have detoured this function's code, Community Shaders does, and putting the old one back would cut it out.
 				released = true;
 				ReleaseAll();
 				logger::info("[{:6.1f} s] Present hook stays as a pass-through", Status::Uptime());
 			}
-		}
-		// Follows the shared slot, so a mod that hooks it after us still runs for the game's swapchain.
-		auto next = reinterpret_cast<Present_t>(sharedVtable[8]);
-		if (next == &HookedPresent) {
-			next = originalPresent;
 		}
 		return next(a_swapChain, a_sync, a_flags);
 	}
