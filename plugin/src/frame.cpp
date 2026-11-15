@@ -1,5 +1,6 @@
 #include "frame.h"
 #include "state.h"
+#include "vr.h"
 
 #include <d3d11.h>
 #include <dxgi.h>
@@ -386,10 +387,16 @@ float4 ps(V i) : SV_Target
 				}
 				lastPresentMs = static_cast<std::int64_t>(Status::Uptime() * 1000.0);
 				Draw(a_swapChain);
+#ifdef ENABLE_SKYRIM_VR
+				Vr::OnPresent(a_swapChain);
+#endif
 			} else if (!released) {
 				// The swapchain keeps our vtable: a mod may have detoured this function's code, Community Shaders does, and putting the old one back would cut it out.
 				released = true;
 				ReleaseAll();
+#ifdef ENABLE_SKYRIM_VR
+				Vr::Release();
+#endif
 				logger::info("[{:6.1f} s] Present hook stays as a pass-through", Status::Uptime());
 			}
 		}

@@ -1157,15 +1157,12 @@ namespace
 	// The status in the headset, from when the game has started OpenVR until startup ends.
 	void UpdateHeadset()
 	{
-		if (Frame::LastPresent() > 0) {
-			Vr::FirstFrame();
-		}
 		if (!Vr::Due()) {
 			return;
 		}
 		const auto size = BoxSize(Px(Vr::MaxWidthPx));
 		if (const auto out = BoxPixels(size, !windowAt); !out.empty()) {
-			Vr::Show(out, size.cx, size.cy, 100.0f / scalePct);
+			Vr::Publish(out, size.cx, size.cy, Px(Vr::MaxWidthPx), 100.0f / scalePct);
 		}
 	}
 #endif
@@ -1307,9 +1304,6 @@ namespace
 		} else if (Status::Uptime() - readyAt > settings.lingerSeconds) {
 			KillTimer(nullptr, timer);
 			Frame::Stop();
-#ifdef ENABLE_SKYRIM_VR
-			Vr::Stop();
-#endif
 			DestroySplash();
 			if (window) {
 				DestroyWindow(window);
