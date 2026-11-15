@@ -18,6 +18,7 @@ namespace
 	Overlay::Settings settings;
 	HWND              window = nullptr;
 	HWND              splash = nullptr;
+	bool              splashFocused = false;  // the splash had the foreground at some point
 	HICON             logo = nullptr;
 	HBITMAP           picture = nullptr;  // the splash image at its drawn size, else the logo is shown
 	SIZE              pictureSize{};
@@ -949,6 +950,11 @@ namespace
 		case CloseSplashMsg:
 			DestroySplash();
 			return 0;
+		case WM_NCACTIVATE:
+			if (a_hwnd == splash && a_wp) {
+				splashFocused = true;
+			}
+			break;
 		case WM_PAINT:
 			if (a_hwnd == window || a_hwnd == splash) {
 				Paint(a_hwnd);
@@ -1311,10 +1317,30 @@ namespace
 				windowAt = Status::Uptime();
 				gameEstimate.entered[0] = windowAt;
 				scanFiles = Status::looseFiles;
+				// When the game took the foreground while this thread wasn't taking messages, the splash's deactivation is still queued and it looks active.
+				// Closing or keeping it in that state left the game inactive behind a black main menu, so the queue is handled first, timers left out since they would run this tick again.
+				if (splash && splashFocused && GetActiveWindow() == splash && GetForegroundWindow() != splash) {
+					const double until = Status::Uptime() + 0.5;
+					MSG          m;
+					bool         quit = false;
+					while (splash && GetActiveWindow() == splash && Status::Uptime() < until && !quit) {
+						while (PeekMessageW(&m, nullptr, 0, WM_TIMER - 1, PM_REMOVE) || PeekMessageW(&m, nullptr, WM_TIMER + 1, 0xFFFFFFFF, PM_REMOVE)) {
+							if (m.message == WM_QUIT) {
+								PostQuitMessage(static_cast<int>(m.wParam));
+								quit = true;
+								break;
+							}
+							DispatchMessageW(&m);
+						}
+						MsgWaitForMultipleObjects(0, nullptr, FALSE, 10, QS_ALLINPUT);
+					}
+					logger::info("[{:6.1f} s] Splash deactivation was still queued, {}", Status::Uptime(),
+						splash && GetActiveWindow() == splash ? "still active after 0.5 s" : "handled");
+				}
 				// A splash shown behind another app never had focus but is active on this thread, and the child window's input link would make it the active window the game sets its keyboard up with.
-				if (splash && GetActiveWindow() == splash && GetForegroundWindow() != splash) {
+				if (splash && !splashFocused && GetActiveWindow() == splash && GetForegroundWindow() != splash) {
 					DestroySplash();
-					logger::info("[{:6.1f} s] Splash closed early, it was active but not in front", Status::Uptime());
+					logger::info("[{:6.1f} s] Splash closed early, it was active but never in front", Status::Uptime());
 				}
 
 				CreateOverlay(game);
