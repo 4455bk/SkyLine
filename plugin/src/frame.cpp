@@ -158,10 +158,10 @@ float4 ps(V i) : SV_Target
 
 	void STDMETHODCALLTYPE HookedExecute(ID3D12CommandQueue* a_queue, UINT a_count, ID3D12CommandList* const* a_lists)
 	{
-		if (GetCurrentThreadId() == renderThread && inGamePresent && a_queue->GetDesc().Type == D3D12_COMMAND_LIST_TYPE_DIRECT) {
+		if (!stopped && GetCurrentThreadId() == renderThread && inGamePresent && a_queue->GetDesc().Type == D3D12_COMMAND_LIST_TYPE_DIRECT) {
 			submittedQueue = a_queue;
 		}
-		originalExecute(a_queue, a_count, a_lists);
+		TAIL_CALL return originalExecute(a_queue, a_count, a_lists);
 	}
 
 	// Hooks ExecuteCommandLists in the D3D12 queue vtable, found from a throwaway queue. It stays a pass-through after startup.
@@ -530,12 +530,12 @@ float4 ps(V i) : SV_Target
 	// The Steam overlay calls Present again through the slot from inside its own hook, nested calls only pass through.
 	thread_local bool insideInner = false;
 
-	HRESULT STDMETHODCALLTYPE InnerPresent(IDXGISwapChain* a_swapChain, UINT a_sync, UINT a_flags)
+	// Kept out of InnerPresent so that hook stays a plain jump to DXGI's Present after startup.
+	__declspec(noinline) HRESULT OnInnerPresent(IDXGISwapChain* a_swapChain, UINT a_sync, UINT a_flags)
 	{
-		const bool entered = !insideInner;
 		insideInner = true;
 		// Only inside the game's Present, so other swapchains and the wrapper's own extra presents are left alone.
-		if (entered && inGamePresent && !stopped && !(a_flags & DXGI_PRESENT_TEST)) {
+		if (inGamePresent && !(a_flags & DXGI_PRESENT_TEST)) {
 			if (!innerChain) {
 				innerChain = a_swapChain;
 				logger::info("[{:6.1f} s] Drawing into frames at DXGI's Present, after the swapchain wrapper", Status::Uptime());
@@ -550,10 +550,16 @@ float4 ps(V i) : SV_Target
 			}
 		}
 		const auto hr = innerPresent(a_swapChain, a_sync, a_flags);
-		if (entered) {
-			insideInner = false;
-		}
+		insideInner = false;
 		return hr;
+	}
+
+	HRESULT STDMETHODCALLTYPE InnerPresent(IDXGISwapChain* a_swapChain, UINT a_sync, UINT a_flags)
+	{
+		if (!stopped && !insideInner) {
+			return OnInnerPresent(a_swapChain, a_sync, a_flags);
+		}
+		TAIL_CALL return innerPresent(a_swapChain, a_sync, a_flags);
 	}
 
 	// Finds Present's slot in DXGI's swapchain vtable from a throwaway swapchain made with the system d3d11.dll. It can take seconds, so it runs apart.
@@ -631,6 +637,54 @@ float4 ps(V i) : SV_Target
 		logger::info("[{:6.1f} s] DXGI Present hooked", Status::Uptime());
 	}
 
+	// Kept out of HookedPresent so the hook stays a plain jump to the next Present. True when DXGI's Present does the drawing.
+	__declspec(noinline) bool OnPresent(IDXGISwapChain* a_swapChain)
+	{
+		if (!stopped) {
+			if (!loggedSwapChain) {
+				loggedSwapChain = true;
+				LogSwapChain(a_swapChain);
+			}
+			lastPresentMs = static_cast<std::int64_t>(Status::Uptime() * 1000.0);
+			if (route == Route::Unknown) {
+				CheckRoute(a_swapChain);
+			}
+			if (route == Route::Waiting && innerLookupDone) {
+				InstallInner();
+			}
+			if (route == Route::Game) {
+				Draw(a_swapChain);
+			}
+			return route == Route::Inner;
+		}
+		// The swapchain keeps our vtable: a mod may have detoured this function's code, Community Shaders does, and putting the old one back would cut it out.
+		released = true;
+		ReleaseAll();
+		logger::info("[{:6.1f} s] Present hook stays as a pass-through", Status::Uptime());
+		return false;
+	}
+
+	// The game's Present with InnerPresent drawing inside it, startup only.
+	__declspec(noinline) HRESULT PresentThroughInner(IDXGISwapChain* a_swapChain, UINT a_sync, UINT a_flags, Present_t a_next)
+	{
+		renderThread = GetCurrentThreadId();
+		inGamePresent = true;
+		innerReached = false;
+		submittedQueue = nullptr;
+		const auto hr = a_next(a_swapChain, a_sync, a_flags);
+		inGamePresent = false;
+		framesWithoutInner = innerReached ? 0 : framesWithoutInner + 1;
+		if (framesWithoutInner >= 3) {
+			// The slot stays hooked, it only passes through from here.
+			logger::warn("[{:6.1f} s] DXGI's Present not reached for 3 frames, status drawn into the wrapper's buffer", Status::Uptime());
+			route = Route::Game;
+			ReleaseAll();
+			failed = false;
+			textureVersion = 0;
+		}
+		return hr;
+	}
+
 	HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain* a_swapChain, UINT a_sync, UINT a_flags)
 	{
 		// Follows the shared slot, so a mod that hooks it after us still runs for the game's swapchain.
@@ -638,47 +692,11 @@ float4 ps(V i) : SV_Target
 		if (next == &HookedPresent) {
 			next = originalPresent;
 		}
-		if (!(a_flags & DXGI_PRESENT_TEST)) {
-			if (!stopped) {
-				if (!loggedSwapChain) {
-					loggedSwapChain = true;
-					LogSwapChain(a_swapChain);
-				}
-				lastPresentMs = static_cast<std::int64_t>(Status::Uptime() * 1000.0);
-				if (route == Route::Unknown) {
-					CheckRoute(a_swapChain);
-				}
-				if (route == Route::Waiting && innerLookupDone) {
-					InstallInner();
-				}
-				if (route == Route::Game) {
-					Draw(a_swapChain);
-				} else if (route == Route::Inner) {
-					renderThread = GetCurrentThreadId();
-					inGamePresent = true;
-					innerReached = false;
-					submittedQueue = nullptr;
-					const auto hr = next(a_swapChain, a_sync, a_flags);
-					inGamePresent = false;
-					framesWithoutInner = innerReached ? 0 : framesWithoutInner + 1;
-					if (framesWithoutInner >= 3) {
-						// The slot stays hooked, it only passes through from here.
-						logger::warn("[{:6.1f} s] DXGI's Present not reached for 3 frames, status drawn into the wrapper's buffer", Status::Uptime());
-						route = Route::Game;
-						ReleaseAll();
-						failed = false;
-						textureVersion = 0;
-					}
-					return hr;
-				}
-			} else if (!released) {
-				// The swapchain keeps our vtable: a mod may have detoured this function's code, Community Shaders does, and putting the old one back would cut it out.
-				released = true;
-				ReleaseAll();
-				logger::info("[{:6.1f} s] Present hook stays as a pass-through", Status::Uptime());
-			}
+		if (!released && !(a_flags & DXGI_PRESENT_TEST) && OnPresent(a_swapChain)) {
+			return PresentThroughInner(a_swapChain, a_sync, a_flags, next);
 		}
-		return next(a_swapChain, a_sync, a_flags);
+		// After startup the next Present runs with no frame of ours below it, so hitch tools don't blame SkyLine for its waits.
+		TAIL_CALL return next(a_swapChain, a_sync, a_flags);
 	}
 }
 

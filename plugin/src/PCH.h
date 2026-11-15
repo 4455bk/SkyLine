@@ -22,6 +22,13 @@
 
 #define DLLEXPORT __declspec(dllexport)
 
+// A hook passing a call on jumps instead of calling, so a stack sampler never finds SkyLine above the real function.
+#if defined(__clang__)
+#	define TAIL_CALL [[clang::musttail]]
+#else
+#	define TAIL_CALL
+#endif
+
 namespace logger = SKSE::log;
 
 using namespace std::literals;

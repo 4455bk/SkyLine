@@ -187,8 +187,11 @@ namespace
 	HANDLE WINAPI HookCreateFileA(LPCSTR a_name, DWORD a_access, DWORD a_share, LPSECURITY_ATTRIBUTES a_sa, DWORD a_disp,
 		DWORD a_flags, HANDLE a_template)
 	{
+		if (Status::done.load(std::memory_order_relaxed)) {
+			TAIL_CALL return _CreateFileA(a_name, a_access, a_share, a_sa, a_disp, a_flags, a_template);
+		}
 		const auto handle = _CreateFileA(a_name, a_access, a_share, a_sa, a_disp, a_flags, a_template);
-		if (handle != INVALID_HANDLE_VALUE && a_name && !Status::done.load(std::memory_order_relaxed)) {
+		if (handle != INVALID_HANDLE_VALUE && a_name) {
 			const auto error = GetLastError();
 			OnFileOpen(a_name);
 			SetLastError(error);
@@ -199,8 +202,11 @@ namespace
 	HANDLE WINAPI HookCreateFileW(LPCWSTR a_name, DWORD a_access, DWORD a_share, LPSECURITY_ATTRIBUTES a_sa, DWORD a_disp,
 		DWORD a_flags, HANDLE a_template)
 	{
+		if (Status::done.load(std::memory_order_relaxed)) {
+			TAIL_CALL return _CreateFileW(a_name, a_access, a_share, a_sa, a_disp, a_flags, a_template);
+		}
 		const auto handle = _CreateFileW(a_name, a_access, a_share, a_sa, a_disp, a_flags, a_template);
-		if (handle != INVALID_HANDLE_VALUE && a_name && !Status::done.load(std::memory_order_relaxed)) {
+		if (handle != INVALID_HANDLE_VALUE && a_name) {
 			const auto error = GetLastError();
 			OnFileOpen(Narrow(a_name));
 			SetLastError(error);
@@ -256,13 +262,16 @@ namespace
 		if (a_name && !Status::done.load(std::memory_order_relaxed)) {
 			OnFolder(a_name);
 		}
-		return _FindFirstFileA(a_name, a_data);
+		TAIL_CALL return _FindFirstFileA(a_name, a_data);
 	}
 
 	BOOL WINAPI HookFindNextFileA(HANDLE a_find, LPWIN32_FIND_DATAA a_data)
 	{
+		if (Status::done.load(std::memory_order_relaxed)) {
+			TAIL_CALL return _FindNextFileA(a_find, a_data);
+		}
 		const auto found = _FindNextFileA(a_find, a_data);
-		if (found && !(a_data->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && !Status::done.load(std::memory_order_relaxed)) {
+		if (found && !(a_data->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
 			Status::looseFiles.fetch_add(1, std::memory_order_relaxed);
 		}
 		return found;
@@ -290,7 +299,7 @@ namespace
 		if (a_name) {
 			OnLibrary(a_name);
 		}
-		return _LoadLibraryA(a_name);
+		TAIL_CALL return _LoadLibraryA(a_name);
 	}
 
 	HMODULE WINAPI HookLoadLibraryExA(LPCSTR a_name, HANDLE a_file, DWORD a_flags)
@@ -298,7 +307,7 @@ namespace
 		if (a_name) {
 			OnLibrary(a_name);
 		}
-		return _LoadLibraryExA(a_name, a_file, a_flags);
+		TAIL_CALL return _LoadLibraryExA(a_name, a_file, a_flags);
 	}
 
 	HMODULE WINAPI HookLoadLibraryExW(LPCWSTR a_name, HANDLE a_file, DWORD a_flags)
@@ -306,7 +315,7 @@ namespace
 		if (a_name) {
 			OnLibrary(Narrow(a_name));
 		}
-		return _LoadLibraryExW(a_name, a_file, a_flags);
+		TAIL_CALL return _LoadLibraryExW(a_name, a_file, a_flags);
 	}
 
 	template <class T>
@@ -328,7 +337,7 @@ namespace
 		if (!a_parent) {
 			Overlay::CloseSplash();
 		}
-		return _CreateWindowExA(a_exStyle, a_class, a_name, a_style, a_x, a_y, a_width, a_height, a_parent, a_menu, a_instance, a_param);
+		TAIL_CALL return _CreateWindowExA(a_exStyle, a_class, a_name, a_style, a_x, a_y, a_width, a_height, a_parent, a_menu, a_instance, a_param);
 	}
 
 	HWND WINAPI HookCreateWindowExW(DWORD a_exStyle, LPCWSTR a_class, LPCWSTR a_name, DWORD a_style, int a_x, int a_y, int a_width,
@@ -337,7 +346,7 @@ namespace
 		if (!a_parent) {
 			Overlay::CloseSplash();
 		}
-		return _CreateWindowExW(a_exStyle, a_class, a_name, a_style, a_x, a_y, a_width, a_height, a_parent, a_menu, a_instance, a_param);
+		TAIL_CALL return _CreateWindowExW(a_exStyle, a_class, a_name, a_style, a_x, a_y, a_width, a_height, a_parent, a_menu, a_instance, a_param);
 	}
 
 	void InstallHooks(const SKSE::LoadInterface* a_skse)
