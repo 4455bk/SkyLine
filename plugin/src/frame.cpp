@@ -105,6 +105,17 @@ float4 ps(V i) : SV_Target
 		}
 	}
 
+	// The system d3d11.dll by path: the one loaded under that name can be a proxy in the game folder that doesn't export everything.
+	HMODULE SystemD3D11()
+	{
+		static const auto module = [] {
+			wchar_t system[MAX_PATH]{};
+			GetSystemDirectoryW(system, MAX_PATH);
+			return LoadLibraryW((std::filesystem::path(system) / L"d3d11.dll").c_str());
+		}();
+		return module;
+	}
+
 	void ReleaseAll()
 	{
 		SafeRelease(view);
@@ -192,7 +203,12 @@ float4 ps(V i) : SV_Target
 	bool InitOn12(IDXGISwapChain* a_swapChain)
 	{
 		using Create_t = decltype(&D3D11On12CreateDevice);
-		const auto          create = reinterpret_cast<Create_t>(GetProcAddress(GetModuleHandleW(L"d3d11.dll"), "D3D11On12CreateDevice"));
+		const auto          d3d11 = SystemD3D11();
+		const auto          create = d3d11 ? reinterpret_cast<Create_t>(GetProcAddress(d3d11, "D3D11On12CreateDevice")) : nullptr;
+		if (!create) {
+			logger::warn("D3D11On12CreateDevice not found in the system d3d11.dll");
+			return false;
+		}
 		ID3D12CommandQueue* queue = nullptr;
 		ID3D12Device*       device12 = nullptr;
 		if (SUCCEEDED(a_swapChain->GetDevice(__uuidof(ID3D12CommandQueue), reinterpret_cast<void**>(&queue)))) {
@@ -204,7 +220,7 @@ float4 ps(V i) : SV_Target
 				queue->AddRef();
 			}
 		}
-		bool ok = create && queue && device12;
+		bool ok = queue && device12;
 		if (ok) {
 			IUnknown*  queues[] = { queue };
 			const auto hr = create(device12, 0, nullptr, 0, queues, 1, 0, &device, &context, nullptr);
@@ -565,9 +581,7 @@ float4 ps(V i) : SV_Target
 	// Finds Present's slot in DXGI's swapchain vtable from a throwaway swapchain made with the system d3d11.dll. It can take seconds, so it runs apart.
 	void LookUpInner()
 	{
-		wchar_t system[MAX_PATH]{};
-		GetSystemDirectoryW(system, MAX_PATH);
-		const auto d3d11 = LoadLibraryW((std::filesystem::path(system) / L"d3d11.dll").c_str());
+		const auto d3d11 = SystemD3D11();
 		const auto create = d3d11 ? reinterpret_cast<PFN_D3D11_CREATE_DEVICE_AND_SWAP_CHAIN>(GetProcAddress(d3d11, "D3D11CreateDeviceAndSwapChain")) : nullptr;
 		const auto window = CreateWindowExW(0, L"STATIC", L"", WS_POPUP, 0, 0, 8, 8, nullptr, nullptr, nullptr, nullptr);
 		IDXGISwapChain*      chain = nullptr;
@@ -706,7 +720,11 @@ namespace Frame
 	{
 		const auto data = RE::BSGraphics::Renderer::GetRendererDataSingleton();
 		const auto swapChain = data ? reinterpret_cast<IDXGISwapChain*>(data->renderWindows[0].swapChain) : nullptr;
-		if (!swapChain) {
+		// Another wrapper can replace the stored swapchain right after the game sets it, and the replaced one is still called
+		// from inside the new one, but draws there can miss the screen. So hook only one seen on two calls in a row.
+		static IDXGISwapChain* seen = nullptr;
+		if (!swapChain || swapChain != seen) {
+			seen = swapChain;
 			return false;
 		}
 		auto** vtable = *reinterpret_cast<void***>(swapChain);
