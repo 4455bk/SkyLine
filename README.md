@@ -23,6 +23,7 @@ Settings are in `SKSE/Plugins/SkyLine.ini`. Keys set in `SKSE/Plugins/SkyLine_Cu
 | `bDpiScaling` | 0 ignores Windows display scaling |
 | `iBarHeight`, `iBarLength`, `sBarColor` | bar size and color |
 | `sPosition`, `iOffsetX`, `iOffsetY` | position and offset |
+| `bLoadingScreens` | 1 also shows the bar on in-game loading screens (test feature) |
 | `iLingerSeconds` | for how many seconds to keep the overlay after the game is loaded |
 | `bLog` | enable/disable log |
 
@@ -47,3 +48,4 @@ cmake --build build --config Release
 - **meh321**: [Address Library for SKSE Plugins](https://www.nexusmods.com/skyrimspecialedition/mods/32444)
 - [CommonLibSSE-NG](https://github.com/CharmedBaryon/CommonLibSSE-NG) and its contributors
 - [spdlog](https://github.com/gabime/spdlog)
+- **ahzaab**: [Skyrim Load Progress](https://github.com/ahzaab/sky-load-progress) ([Clean Loading Transitions](https://www.nexusmods.com/skyrimspecialedition/mods/190193)), the algorithm behind load queue counters on loading screens

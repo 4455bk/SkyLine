@@ -1,8 +1,10 @@
 #include "overlay.h"
 #include "frame.h"
+#include "loadscreen.h"
 #include "sampler.h"
 #include "state.h"
 
+#include <deque>
 #include <wincodec.h>
 
 // Status box drawn with GDI from its own thread: splash, then a child window, then the game's frames (frame.cpp).
@@ -339,8 +341,15 @@ namespace
 	int Pad() { return settings.barOnly ? 0 : Px(10); }
 
 	// Splash bar until the game window, game bar from there to the main menu, each from its stage estimate.
+	// After startup with bLoadingScreens: the overlay thread stays and only draws during loads.
+	bool   idle = false;
+	double loadValue = 0;  // the bar during a load, never moving back
+
 	double Progress(bool a_splash)
 	{
+		if (idle) {
+			return loadValue;
+		}
 		const double t = Status::Uptime();
 		const auto   finish = [&](double a_from, double a_at) { return std::min(1.0, a_from + (1.0 - a_from) * (t - a_at) / FinishSeconds); };
 		if (a_splash && windowAt) {
@@ -1208,8 +1217,135 @@ namespace
 		return s.best;
 	}
 
+	// Loading screens after startup: the bar and status are drawn into its frames from the load's start
+	bool             loadVisible = false;
+	std::uint32_t    loadTracked = 0;  // the load the values below are for
+	std::uint32_t    loadLogged = 0;   // the last load whose end was logged
+	double           loadTraceAt = 0;
+	std::uint64_t    loadCounts = 0;  // done plus total, to tell when the counts last moved
+	double           loadMovedAt = 0;
+	double           loadValueAt = 0;  // when the bar last moved
+	std::deque<std::pair<double, std::uint64_t>> loadTotals;  // the last second's queue totals
+
+	std::string QueueCounts(const LoadScreen::Snapshot& a_s)
+	{
+		std::string s;
+		for (std::size_t q = 0; q < LoadScreen::kQueues; ++q) {
+			if (a_s.counted[q] && a_s.total[q]) {
+				s += std::format("{}{} {}/{}", s.empty() ? "" : ", ", LoadScreen::queueNames[q], a_s.done[q], a_s.total[q]);
+			}
+		}
+		return s.empty() ? "no queued work"s : s;
+	}
+
+	void ComposeLoad(const LoadScreen::Snapshot& a_s, double a_now)
+	{
+		std::string file;
+		double      fileAt = 0;
+		{
+			std::scoped_lock l{ Status::shared.lock };
+			file = Status::shared.file;
+			fileAt = Status::shared.fileAt;
+		}
+		std::string h;
+		if (a_s.saveSize && a_s.saveRead < a_s.saveSize) {
+			h = std::format("Reading save {:.1f}/{:.1f} MB", a_s.saveRead / 1048576.0, a_s.saveSize / 1048576.0);
+		} else {
+			h = a_s.cell.empty() ? "Loading"s : "Loading " + a_s.cell;
+		}
+		std::string d = std::format("{:.0f}s", a_now - a_s.startedAt);
+		if (!file.empty() && a_now - fileAt < 1.5) {
+			d += " · " + file;
+		}
+		if (mainBusy.IsPlugin()) {
+			d += " · " + mainBusy.shown + " running";
+		}
+		head = Wide(h);
+		detail = Wide(d);
+	}
+
+	void LoadTick()
+	{
+		static int ticks = 0;
+		const auto s = LoadScreen::Take();
+		const auto t = Status::Uptime();
+		if (s.id != loadTracked) {
+			loadTracked = s.id;
+			loadValue = 0;
+			loadValueAt = s.startedAt;
+			loadCounts = 0;
+			loadMovedAt = s.startedAt;
+			loadTraceAt = 0;
+			loadTotals.clear();
+			width = 0;
+		}
+		if (const auto counts = s.Done() + s.Total(); counts != loadCounts) {
+			loadCounts = counts;
+			loadMovedAt = s.active ? t : s.endedAt;
+		}
+		const auto   total = s.Total();
+		const double raw = s.Progress();
+		if (!s.active) {
+			if (s.id && loadLogged != s.id) {
+				loadLogged = s.id;
+				logger::info("[{:6.1f} s] Load {} summary: {:.1f} s, {}, counts last moved at +{:.1f} s, bar last moved at +{:.1f} s to {:.0f}%, save read {}/{} bytes",
+					s.endedAt, s.id, s.endedAt - s.startedAt, QueueCounts(s), loadMovedAt - s.startedAt, loadValueAt - s.startedAt,
+					loadValue * 100, s.saveRead, s.saveSize);
+			}
+			if (loadVisible) {
+				loadVisible = false;
+				Frame::ShowDuringLoad(false);
+			}
+			return;
+		}
+		const double elapsed = t - s.startedAt;
+		// The bar moves only once the total grew less than 10% over the last second, early ratios over a few items said nothing.
+		loadTotals.emplace_back(t, total);
+		while (loadTotals.size() > 1 && t - loadTotals[1].first >= 1.0) {
+			loadTotals.pop_front();
+		}
+		const bool settled = t - loadTotals.front().first >= 1.0 && total * 10 < loadTotals.front().second * 11;
+		if (settled && std::min(raw, 0.99) > loadValue) {
+			loadValue = std::min(raw, 0.99);  // the last bit is the loading screen closing
+			loadValueAt = t;
+		}
+		if (t - loadTraceAt >= 1.0) {
+			loadTraceAt = t;
+			const auto last = Frame::LastPresent();
+			logger::info("[{:6.1f} s] Load {} +{:.1f} s: {:.0f}% done, bar {:.0f}%, {}, save read {}/{}, last frame {:.1f} s ago, counts moved {:.1f} s ago{}{}",
+				t, s.id, elapsed, raw * 100, loadValue * 100, QueueCounts(s), s.saveRead, s.saveSize, last > 0 ? t - last : -1.0,
+				t - loadMovedAt, s.item.empty() ? ""s : ", last item " + s.item + " (" + s.plugin + ")", s.cell.empty() ? ""s : " in " + s.cell);
+		}
+		if (!game || !IsWindow(game)) {
+			game = FindGameWindow();
+			if (!game) {
+				return;
+			}
+		}
+		if (!hooked) {
+			hooked = Frame::TryHook();
+		}
+		if (++ticks % 10 == 1) {
+			Sampler::RefreshModules();
+		}
+		if (mainSampler.Id()) {
+			mainBusy.Add(mainSampler.Sample());
+		}
+		ComposeLoad(s, t);
+		PublishFrame();
+		if (!loadVisible) {
+			loadVisible = true;
+			Frame::ShowDuringLoad(true);
+			logger::info("[{:6.1f} s] Load {} status shown", t, s.id);
+		}
+	}
+
 	void Tick()
 	{
+		if (idle) {
+			LoadTick();
+			return;
+		}
 		static int ticks = 0;
 		++ticks;
 		if (ticks % 10 == 1) {
@@ -1282,13 +1418,19 @@ namespace
 				}
 			}
 		} else if (Status::Uptime() - readyAt > settings.lingerSeconds) {
-			KillTimer(nullptr, timer);
-			Frame::Stop();
 			DestroySplash();
 			if (window) {
 				DestroyWindow(window);
 				window = nullptr;
 			}
+			if (settings.loadingScreens) {
+				idle = true;
+				Frame::ShowDuringLoad(false);
+				logger::info("[{:6.1f} s] Startup status closed, waiting for loading screens", Status::Uptime());
+				return;
+			}
+			KillTimer(nullptr, timer);
+			Frame::Stop();
 			PostQuitMessage(0);
 			return;
 		}

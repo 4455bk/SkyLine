@@ -21,6 +21,7 @@ namespace Overlay
 		COLORREF textColor = RGB(236, 236, 236);  // the detail line is drawn a little dimmer
 		bool     textShadow = true;  // the drop shadow on the splash text and the glow around the text over frames
 		bool     dpiScaling = true;  // false takes the "px at 96 dpi" sizes as physical pixels
+		bool     loadingScreens = false;  // after startup, the bar and status on in-game loading screens
 	};
 
 	// Starts the overlay thread (own window + message loop, so it keeps updating while the game threads are busy).

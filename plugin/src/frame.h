@@ -32,4 +32,7 @@ namespace Frame
 
 	// Stop drawing. The hook stays as a pass-through, since another mod may have hooked over it.
 	void Stop();
+
+	// After startup with loading screens on: draws only while a_show and a load is going on, keeping its resources.
+	void ShowDuringLoad(bool a_show);
 }

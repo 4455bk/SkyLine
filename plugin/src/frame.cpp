@@ -1,4 +1,5 @@
 #include "frame.h"
+#include "loadscreen.h"
 #include "state.h"
 
 #include <d3d11.h>
@@ -18,7 +19,12 @@ namespace
 	bool      loggedSwapChain = false;  // render thread only
 
 	std::atomic<bool>          stopped = false;
+	std::atomic<bool>          loadMode = false;  // after startup, loading screens only
+	std::atomic<bool>          loadShown = false;
 	std::atomic<std::int64_t>  lastPresentMs = 0;
+
+	// Startup, or after it while a loading screen is shown, so the bar is gone from the first frame after it closes.
+	bool Showing() { return !loadMode || (loadShown && LoadScreen::Active()); }
 
 	// A swapchain wrapper whose buffer 0 isn't the swapchain's size (an upscaler's render-size input) never shows what is drawn there.
 	// Then the status goes in at DXGI's own Present, into the image the wrapper presents.
@@ -562,7 +568,9 @@ float4 ps(V i) : SV_Target
 					loggedQueueChange = true;
 					logger::warn("[{:6.1f} s] The last queue submitted to before Present changed, drawing may be out of order", Status::Uptime());
 				}
-				Draw(a_swapChain);
+				if (Showing()) {
+					Draw(a_swapChain);
+				}
 			}
 		}
 		const auto hr = innerPresent(a_swapChain, a_sync, a_flags);
@@ -666,7 +674,7 @@ float4 ps(V i) : SV_Target
 			if (route == Route::Waiting && innerLookupDone) {
 				InstallInner();
 			}
-			if (route == Route::Game) {
+			if (route == Route::Game && Showing()) {
 				Draw(a_swapChain);
 			}
 			return route == Route::Inner;
@@ -678,7 +686,7 @@ float4 ps(V i) : SV_Target
 		return false;
 	}
 
-	// The game's Present with InnerPresent drawing inside it, startup only.
+	// The game's Present with InnerPresent drawing inside it, until Stop.
 	__declspec(noinline) HRESULT PresentThroughInner(IDXGISwapChain* a_swapChain, UINT a_sync, UINT a_flags, Present_t a_next)
 	{
 		renderThread = GetCurrentThreadId();
@@ -770,4 +778,10 @@ namespace Frame
 	}
 
 	void Stop() { stopped = true; }
+
+	void ShowDuringLoad(bool a_show)
+	{
+		loadShown = a_show;
+		loadMode = true;
+	}
 }

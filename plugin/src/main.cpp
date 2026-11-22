@@ -1,9 +1,10 @@
 #include "Version.h"
+#include "loadscreen.h"
 #include "overlay.h"
 #include "sampler.h"
 #include "state.h"
 
-// Startup status from import-table hooks, SKSE messages, menu events and the sampler. No game code is patched.
+// Startup status from import-table hooks, SKSE messages, menu events and the sampler. Game code is patched only with bLoadingScreens (loadscreen.cpp).
 
 namespace
 {
@@ -45,7 +46,7 @@ namespace
 
 	std::string Narrow(const wchar_t* a_s) { return SKSE::stl::utf16_to_utf8(a_s).value_or(""s); }
 
-	// Offset just past the Data\ folder in a path (at the start or after a separator, not facegendata\), npos if none.
+	// Offset just past the Data\ folder in a path (at the start or after a separator, so facegendata\ never matches), npos if none.
 	std::size_t BelowData(std::string_view a_path)
 	{
 		const auto lower = Lower(a_path);
@@ -181,19 +182,32 @@ namespace
 
 	decltype(&CreateFileA) _CreateFileA;
 	decltype(&CreateFileW) _CreateFileW;
+	decltype(&ReadFile)    _ReadFile;
+	bool                   loadScreens = false;  // bLoadingScreens
+
+	// Startup, or an in-game load with bLoadingScreens.
+	bool Watching() { return !Status::done.load(std::memory_order_relaxed) || (loadScreens && LoadScreen::Active()); }
+
+	void OnOpened(std::string_view a_path, HANDLE a_handle)
+	{
+		OnFileOpen(a_path);
+		if (loadScreens && LoadScreen::Active() && Lower(a_path).ends_with(".ess")) {
+			LoadScreen::OnSaveOpened(a_handle);
+		}
+	}
 
 	// Only opens that succeed count. The game probes every Skyrim.ccc entry and archive name whether it exists or not.
 
 	HANDLE WINAPI HookCreateFileA(LPCSTR a_name, DWORD a_access, DWORD a_share, LPSECURITY_ATTRIBUTES a_sa, DWORD a_disp,
 		DWORD a_flags, HANDLE a_template)
 	{
-		if (Status::done.load(std::memory_order_relaxed)) {
+		if (!Watching()) {
 			TAIL_CALL return _CreateFileA(a_name, a_access, a_share, a_sa, a_disp, a_flags, a_template);
 		}
 		const auto handle = _CreateFileA(a_name, a_access, a_share, a_sa, a_disp, a_flags, a_template);
 		if (handle != INVALID_HANDLE_VALUE && a_name) {
 			const auto error = GetLastError();
-			OnFileOpen(a_name);
+			OnOpened(a_name, handle);
 			SetLastError(error);
 		}
 		return handle;
@@ -202,16 +216,26 @@ namespace
 	HANDLE WINAPI HookCreateFileW(LPCWSTR a_name, DWORD a_access, DWORD a_share, LPSECURITY_ATTRIBUTES a_sa, DWORD a_disp,
 		DWORD a_flags, HANDLE a_template)
 	{
-		if (Status::done.load(std::memory_order_relaxed)) {
+		if (!Watching()) {
 			TAIL_CALL return _CreateFileW(a_name, a_access, a_share, a_sa, a_disp, a_flags, a_template);
 		}
 		const auto handle = _CreateFileW(a_name, a_access, a_share, a_sa, a_disp, a_flags, a_template);
 		if (handle != INVALID_HANDLE_VALUE && a_name) {
 			const auto error = GetLastError();
-			OnFileOpen(Narrow(a_name));
+			OnOpened(Narrow(a_name), handle);
 			SetLastError(error);
 		}
 		return handle;
+	}
+
+	// Bytes read from the save file during a load.
+	BOOL WINAPI HookReadFile(HANDLE a_file, LPVOID a_buffer, DWORD a_size, LPDWORD a_read, LPOVERLAPPED a_overlapped)
+	{
+		const auto ok = _ReadFile(a_file, a_buffer, a_size, a_read, a_overlapped);
+		if (ok && a_read && !a_overlapped && LoadScreen::Active()) {
+			LoadScreen::OnRead(a_file, *a_read);
+		}
+		return ok;
 	}
 
 	// The engine indexes every loose file below Data\ before the game window exists, one FindFirstFileA per folder.
@@ -356,6 +380,9 @@ namespace
 		Patch(game, "The game exe", "CreateFileW", &HookCreateFileW, _CreateFileW);
 		Patch(game, "The game exe", "FindFirstFileA", &HookFindFirstFileA, _FindFirstFileA);
 		Patch(game, "The game exe", "FindNextFileA", &HookFindNextFileA, _FindNextFileA);
+		if (loadScreens) {
+			Patch(game, "The game exe", "ReadFile", &HookReadFile, _ReadFile);
+		}
 		// The load interface lives in the runtime's skse64_1_x_y.dll or sksevr_1_4_15.dll, whatever the game version.
 		HMODULE skse = nullptr;
 		if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
@@ -375,6 +402,9 @@ namespace
 				a_event->menuName == RE::MainMenu::MENU_NAME) {
 				logger::info("[{:6.1f} s] {} opened", Status::Uptime(), a_event->menuName.c_str());
 				Status::mainMenu = true;
+			}
+			if (a_event && loadScreens && a_event->menuName == RE::LoadingMenu::MENU_NAME) {
+				a_event->opening ? LoadScreen::Begin("loading screen") : LoadScreen::End("loading screen closed");
 			}
 			return RE::BSEventNotifyControl::kContinue;
 		}
@@ -426,6 +456,17 @@ namespace
 				AddMenuSink();
 				Status::dataLoadedAt = t;
 				Status::dataLoaded = true;
+			}
+			break;
+		case SKSE::MessagingInterface::kPreLoadGame:
+			if (loadScreens) {
+				LoadScreen::Begin("save load");
+			}
+			break;
+		case SKSE::MessagingInterface::kPostLoadGame:
+			// A save load that fails or shows no loading screen ends here, otherwise the loading screen ends it.
+			if (const auto ui = RE::UI::GetSingleton(); loadScreens && ui && !ui->IsMenuOpen(RE::LoadingMenu::MENU_NAME)) {
+				LoadScreen::End("save loaded, no loading screen open");
 			}
 			break;
 		default:
@@ -635,6 +676,7 @@ namespace
 		s.showDetail = get(L"bShowDetail", 1) != 0;
 		s.textShadow = get(L"bTextShadow", 1) != 0;
 		s.dpiScaling = get(L"bDpiScaling", 1) != 0;
+		s.loadingScreens = get(L"bLoadingScreens", 0) != 0;
 		s.splash = get(L"bSplash", 1) != 0;
 		s.splashWidth = std::clamp(get(L"iSplashWidth", s.splashWidth), 240, 8192);
 		s.barHeight = std::clamp(get(L"iBarHeight", s.barHeight), 1, 64);
@@ -676,8 +718,8 @@ namespace
 		}
 		const auto hex = [](COLORREF a_c) { return std::format("{:02X}{:02X}{:02X}", GetRValue(a_c), GetGValue(a_c), GetBValue(a_c)); };
 		logger::info("Settings: font {} {} px, linger {} s, splash {} width {}, bar only {}, detail {}, bar {}x{} color {}, text color {}, text shadow {}, dpi scaling {}, "
-			"position {},{} offset {},{}", SKSE::stl::utf16_to_utf8(s.font).value_or("?"), s.fontSize, s.lingerSeconds, s.splash, s.splashWidth, s.barOnly, s.showDetail, s.barLength, s.barHeight,
-			hex(s.barColor), hex(s.textColor), s.textShadow, s.dpiScaling, s.anchor.x, s.anchor.y, s.offset.x, s.offset.y);
+			"position {},{} offset {},{}, loading screens {}", SKSE::stl::utf16_to_utf8(s.font).value_or("?"), s.fontSize, s.lingerSeconds, s.splash, s.splashWidth, s.barOnly, s.showDetail, s.barLength, s.barHeight,
+			hex(s.barColor), hex(s.textColor), s.textShadow, s.dpiScaling, s.anchor.x, s.anchor.y, s.offset.x, s.offset.y, s.loadingScreens);
 		return s;
 	}
 
@@ -802,6 +844,10 @@ extern "C" DLLEXPORT bool SKSEPlugin_Load(const SKSE::LoadInterface* a_skse)
 	LoadState();
 	Status::mainThread = GetCurrentThreadId();
 	Sampler::SetSelf(self);
+	loadScreens = settings.loadingScreens;
+	if (loadScreens) {
+		LoadScreen::Install();
+	}
 	InstallHooks(a_skse);
 	SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
 	Overlay::Start(settings);
