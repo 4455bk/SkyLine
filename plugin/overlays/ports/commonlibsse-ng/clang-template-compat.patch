@@ -1,8 +1,7 @@
 diff --git a/include/RE/G/GHashSetBase.h b/include/RE/G/GHashSetBase.h
-index 0000000..0000000 100644
 --- a/include/RE/G/GHashSetBase.h
 +++ b/include/RE/G/GHashSetBase.h
-@@ -211,7 +211,7 @@
+@@ -212,6 +212,6 @@
  			if (a_src.IsEmpty() == false) {
  				SetCapacity(a_memAddr, a_src.GetSize());
 -				for (const_iterator it = a_src.Begin(); it != a_src.End(); ++it) {
@@ -11,12 +10,15 @@ index 0000000..0000000 100644
  				}
  			}
 diff --git a/include/RE/B/BSTPointerAndFlags.h b/include/RE/B/BSTPointerAndFlags.h
-index 0000000..0000000 100644
 --- a/include/RE/B/BSTPointerAndFlags.h
 +++ b/include/RE/B/BSTPointerAndFlags.h
-@@ -44,7 +44,7 @@
- 			clear_flags();
- 			a_rhs._storage.address = a_rhs._storage.address;
--			a_rhs.storage.address = 0;
-+			a_rhs._storage.address = 0;
+@@ -43,7 +43,7 @@
+ 			if (this != std::addressof(a_rhs)) {
+ 				clear_flags();
+ 				a_rhs.clear_flags();
+ 				_storage.address = a_rhs._storage.address;
+-				a_rhs.storage.address = 0;
++				a_rhs._storage.address = 0;
+ 			}
+ 			return *this;
  		}
