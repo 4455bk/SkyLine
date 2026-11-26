@@ -18,7 +18,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -77,9 +77,17 @@ jobs:
           cmake --build build --parallel
 
       - name: Package plugin
+        id: package
         shell: pwsh
         run: |
-          $package = Join-Path $env:RUNNER_TEMP "SkyLine"
+          $cmake = Get-Content "plugin/CMakeLists.txt" -Raw
+          if ($cmake -notmatch 'project\(\s*SkyLine\s+VERSION\s+(\d+)\.(\d+)\.(\d+)') {
+            throw "Unable to read SkyLine version from plugin/CMakeLists.txt"
+          }
+          $version = $Matches[1] + "." + $Matches[2]
+          $date = (Get-Date).ToUniversalTime().ToString("yyyyMMdd")
+          $releaseName = "SkyLine-$version-$date"
+          $package = Join-Path $env:RUNNER_TEMP $releaseName
           $plugins = Join-Path $package "SKSE/Plugins"
           New-Item -ItemType Directory -Path $plugins -Force | Out-Null
 
@@ -92,13 +100,30 @@ jobs:
           Copy-Item -LiteralPath "config/SkyLine.ini" -Destination $plugins
           Copy-Item -LiteralPath "config/SkyLineSplash.jpg" -Destination $plugins
 
-          $archive = Join-Path $env:RUNNER_TEMP "SkyLine-${{ github.sha }}.zip"
+          $archive = Join-Path $env:RUNNER_TEMP "$releaseName.zip"
           Compress-Archive -Path (Join-Path $package "*") -DestinationPath $archive -CompressionLevel Optimal -Force
+
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "date=$date" >> $env:GITHUB_OUTPUT
+          "release_name=$releaseName" >> $env:GITHUB_OUTPUT
+          "archive=$archive" >> $env:GITHUB_OUTPUT
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SkyLine-${{ github.sha }}
-          path: ${{ runner.temp }}/SkyLine-${{ github.sha }}.zip
+          name: ${{ steps.package.outputs.release_name }}
+          path: ${{ steps.package.outputs.archive }}
           if-no-files-found: error
           retention-days: 14
+
+      - name: Publish GitHub Release
+        if: github.event_name != 'pull_request'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.package.outputs.release_name }}-${{ github.run_number }}
+          name: ${{ steps.package.outputs.release_name }}
+          target_commitish: ${{ github.sha }}
+          files: ${{ steps.package.outputs.archive }}
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          make_latest: true
