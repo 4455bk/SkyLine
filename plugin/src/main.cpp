@@ -831,7 +831,7 @@ extern "C" DLLEXPORT bool SKSEPlugin_Load(const SKSE::LoadInterface* a_skse)
 	GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
 		reinterpret_cast<LPCWSTR>(&InitializeLog), &self);
 	InitializeLog();
-	SKSE::Init(a_skse, { .log = false });
+	SKSE::Init(a_skse);
 
 	const auto game = REL::Module::get().version();
 	logger::info("[{:6.1f} s] {} {} (game {})", Status::Uptime(), Version::PROJECT, Version::NAME, game.string());

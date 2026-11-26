@@ -726,8 +726,8 @@ namespace Frame
 {
 	bool TryHook()
 	{
-		const auto data = RE::BSGraphics::Renderer::GetRendererDataSingleton();
-		const auto swapChain = data ? reinterpret_cast<IDXGISwapChain*>(data->renderWindows[0].swapChain) : nullptr;
+		const auto renderer = RE::BSGraphics::Renderer::GetSingleton();
+		const auto swapChain = renderer ? reinterpret_cast<IDXGISwapChain*>(renderer->data.renderWindows[0].swapChain) : nullptr;
 		// Another wrapper can replace the stored swapchain right after the game sets it, and the replaced one is still called
 		// from inside the new one, but draws there can miss the screen. So hook only one seen on two calls in a row.
 		static IDXGISwapChain* seen = nullptr;

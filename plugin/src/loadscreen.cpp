@@ -62,7 +62,7 @@ namespace
 	// Jumps from a_at to the stub, the rest of a patched instruction becomes NOPs (the stub resumes after it).
 	void Branch(std::uintptr_t a_at, std::size_t a_size, std::uintptr_t a_stub)
 	{
-		static_cast<void>(SKSE::GetTrampoline().write_branch<5>(a_at, a_stub, true));
+		static_cast<void>(SKSE::GetTrampoline().write_branch<5>(a_at, a_stub));
 		if (a_size > 5) {
 			const std::vector<std::uint8_t> nops(a_size - 5, 0x90);
 			REL::safe_write(a_at + 5, nops.data(), nops.size());
@@ -154,11 +154,14 @@ namespace
 		finished[LoadScreen::kTasks].fetch_add(1, std::memory_order_relaxed);
 	}
 
-	// The queue type is shared, only IOManager's post-processing queue (its pointer at +0xE0) counts.
+	// CommonLibSSE-NG 3.7.0 no longer exposes RE::IOManager. Keep the native
+	// post-processing hooks chained, but do not classify their shared queue without
+	// the engine singleton pointer; this avoids reading an unrelated queue as the
+	// post-processing queue. The other loading queues continue to be counted.
 	bool IsPostQueue(void* a_queue)
 	{
-		const auto manager = reinterpret_cast<std::uintptr_t>(RE::IOManager::GetSingleton());
-		return manager && *reinterpret_cast<void**>(manager + 0xE0) == a_queue;
+		static_cast<void>(a_queue);
+		return false;
 	}
 	void PostQueued(void* a_queue)
 	{
