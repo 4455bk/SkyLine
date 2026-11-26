@@ -1,17 +1,17 @@
 #pragma once
 
+// Must be defined before CommonLib/SKSE headers transitively include Windows.h.
+#ifndef WIN32_LEAN_AND_MEAN
+#	define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#	define NOMINMAX
+#endif
+
 #include "RE/Skyrim.h"
 #include "SKSE/SKSE.h"
 
 #include <spdlog/sinks/basic_file_sink.h>
-
-#ifndef WIN32_LEAN_AND_MEAN
-#	define WIN32_LEAN_AND_MEAN
-#endif
-
-#ifndef NOMINMAX
-#	define NOMINMAX
-#endif
 
 #include <Windows.h>
 #include <psapi.h>
