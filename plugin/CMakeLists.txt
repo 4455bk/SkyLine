@@ -2,7 +2,7 @@
 cmake_minimum_required(VERSION 3.21)
 project(SkyLine VERSION 1.5.0 LANGUAGES CXX)
 configure_file(cmake/Version.h.in ${CMAKE_CURRENT_BINARY_DIR}/include/Version.h @ONLY)
-# Static CRT (with the x64-windows-static-clangcl triplet), so Windows needs no VC++ runtime of a matching version.
+# Static CRT, so Windows needs no VC++ runtime of a matching version.
 set(CMAKE_MSVC_RUNTIME_LIBRARY MultiThreaded)
 find_package(CommonLibSSE CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)

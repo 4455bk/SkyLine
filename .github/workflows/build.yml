@@ -64,12 +64,12 @@ jobs:
       - name: Install dependencies
         shell: pwsh
         run: |
-          & "$env:VCPKG_HOME/vcpkg.exe" install --triplet x64-windows-static-clangcl --overlay-triplets="$env:GITHUB_WORKSPACE/plugin/triplets" --x-manifest-root="$env:GITHUB_WORKSPACE/plugin"
+          & "$env:VCPKG_HOME/vcpkg.exe" install --triplet x64-windows-static --x-manifest-root="$env:GITHUB_WORKSPACE/plugin"
 
       - name: Configure CMake
         shell: pwsh
         run: |
-          cmake -S plugin -B build -G Ninja "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_HOME/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows-static-clangcl -DVCPKG_OVERLAY_TRIPLETS="$env:GITHUB_WORKSPACE/plugin/triplets" -DCMAKE_CXX_COMPILER=clang-cl -DCMAKE_BUILD_TYPE=Release
+          cmake -S plugin -B build -G Ninja "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_HOME/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows-static -DCMAKE_CXX_COMPILER=clang-cl -DCMAKE_BUILD_TYPE=Release
 
       - name: Build Release
         shell: pwsh
