@@ -39,7 +39,7 @@ jobs:
       - name: Install LLVM clang-cl
         uses: KyleMayes/install-llvm-action@v2
         with:
-          version: "18.1.8"
+          version: "19.1.7"
           directory: ${{ runner.temp }}/llvm
 
       - name: Cache vcpkg
