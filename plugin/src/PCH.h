@@ -11,6 +11,13 @@
 #include "RE/Skyrim.h"
 #include "SKSE/SKSE.h"
 
+// SkyLine supports Skyrim SE and AE, not VR. CommonLibSSE-NG enables VR by
+// default, which makes SKSEPlugin_Query reject non-VR runtimes when this macro
+// leaks through the public CommonLib target definitions.
+#if defined(ENABLE_SKYRIM_VR)
+#	error "SkyLine is an SE/AE plugin. Build CommonLibSSE-NG with ENABLE_SKYRIM_VR=OFF."
+#endif
+
 #include <spdlog/sinks/basic_file_sink.h>
 
 #include <Windows.h>
