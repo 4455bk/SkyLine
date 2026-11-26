@@ -237,13 +237,47 @@ namespace
 
 	std::wstring Wide(std::string_view a_s) { return SKSE::stl::utf8_to_utf16(a_s).value_or(L"?"s); }
 
+	// Translate resource categories only when they are shown in the overlay.
+	std::string_view ChineseNoun(std::string_view a_noun)
+	{
+		static constexpr std::pair<std::string_view, std::string_view> translations[] = {
+			{ "scripts", "脚本" },
+			{ "animations", "动画" },
+			{ "models", "模型" },
+			{ "textures", "纹理" },
+			{ "quest start lists", "任务启动列表" },
+			{ "strings", "字符串资源" },
+			{ "morphs", "变形数据" },
+			{ "LOD settings", "LOD 设置" },
+			{ "archives", "资源档案" },
+			{ "interface files", "界面文件" },
+			{ "sounds", "音频" },
+			{ "config files", "配置文件" },
+			{ "files", "文件" },
+			{ "plants", "植物" },
+			{ "lights", "灯光" },
+			{ "activators", "触发器" },
+			{ "furniture", "家具" },
+			{ "containers", "容器" },
+			{ "doors", "门" },
+			{ "actors", "角色" },
+			{ "objects", "物体" }
+		};
+		for (const auto& [english, chinese] : translations) {
+			if (a_noun == english) {
+				return chinese;
+			}
+		}
+		return a_noun;
+	}
+
 	void ComposeText()
 	{
 		const double t = closing ? readyAt : Status::Uptime();
 		std::string  h;
-		std::string  d = std::format("{:.0f}s", t);
+		std::string  d = std::format("{:.0f}秒", t);
 		if (Status::last.seconds > 0) {
-			d += std::format("/{:.0f}s", Status::last.seconds);
+			d += std::format("/{:.0f}秒", Status::last.seconds);
 		}
 
 		std::string plugin, reopened, library, file, folder;
@@ -275,7 +309,7 @@ namespace
 		const auto* activity = loading && !Status::mainMenu ? PickActivity(activities, t) : nullptr;
 		std::string doing;
 		if (activity) {
-			doing = (activity->owner.empty() ? "loading "s : activity->owner + " loading ") + std::string(activity->noun);
+			doing = activity->owner.empty() ? "正在加载" + std::string(ChineseNoun(activity->noun)) : activity->owner + " 正在加载" + std::string(ChineseNoun(activity->noun));
 		} else if (dataBusy.IsPlugin()) {
 			doing = dataBusy.shown;
 		} else if (mainBusy.IsPlugin()) {
@@ -283,49 +317,49 @@ namespace
 		}
 
 		if (closing) {
-			h = std::format("Startup finished in {:.1f} s", readyAt);
+			h = std::format("启动完成，用时 {:.1f} 秒", readyAt);
 		} else if (!Status::postLoad) {
 			if (!library.empty() && t - libraryAt < 1.5) {
-				h = "Loading SKSE plugin: " + library;
+				h = "正在加载 SKSE 插件：" + library;
 			} else if (mainBusy.IsPlugin()) {
-				h = "Starting SKSE plugin: " + mainBusy.shown;
+				h = "正在启动 SKSE 插件：" + mainBusy.shown;
 			} else {
-				h = "Loading SKSE plugins";
+				h = "正在加载 SKSE 插件";
 			}
 		} else if (!Status::dataLoaded && !loading && index && t - pluginAt < 1.0) {
-			h = std::format("Checking plugin files {}: {}", index, plugin);
+			h = std::format("正在检查游戏插件文件 {}：{}", index, plugin);
 		} else if (!Status::dataLoaded && !loading && scanning) {
-			h = "Scanning loose files: " + folder;
+			h = "正在扫描松散文件：" + folder;
 		} else if (!Status::dataLoaded && !loading) {
-			h = mainBusy.IsPlugin() ? "Starting engine: " + mainBusy.shown : "Starting engine"s;
+			h = mainBusy.IsPlugin() ? "正在启动游戏引擎：" + mainBusy.shown : "正在启动游戏引擎"s;
 		} else if (!Status::dataLoaded) {
 			if (index >= total && t - pluginAt > 2.0) {
 				if (doing.empty() && !reopened.empty() && t - reopenedAt < 1.5) {
 					doing = reopened;
 				}
-				h = doing.empty() ? "Setting up game data"s : "Setting up game data: " + doing;
+				h = doing.empty() ? "正在初始化游戏数据"s : "正在初始化游戏数据：" + doing;
 			} else if (total) {
-				h = std::format("Loading plugin {}/{}: {}", index, total, plugin);
+				h = std::format("正在加载游戏插件 {}/{}：{}", index, total, plugin);
 			} else {
-				h = std::format("Loading plugin {}: {}", index, plugin);
+				h = std::format("正在加载游戏插件 {}：{}", index, plugin);
 			}
 		} else if (!Status::mainMenu) {
-			h = doing.empty() ? "Preparing main menu"s : "Preparing main menu: " + doing;
+			h = doing.empty() ? "正在准备主菜单"s : "正在准备主菜单：" + doing;
 		} else {
-			h = std::format("Main menu shown, still loading plugin {}/{}: {}", index, total, plugin);
+			h = std::format("主菜单已显示，仍在加载游戏插件 {}/{}：{}", index, total, plugin);
 		}
 
 		if (!closing) {
 			if (scanning && Status::last.files) {
-				d += std::format(" · {}/{} loose files", Status::looseFiles.load(), Status::last.files);
+				d += std::format(" · 已扫描 {}/{} 个松散文件", Status::looseFiles.load(), Status::last.files);
 			} else if (scanning) {
-				d += std::format(" · {} loose files", Status::looseFiles.load());
+				d += std::format(" · 已扫描 {} 个松散文件", Status::looseFiles.load());
 			}
 			if (activity && (Status::dataLoaded || (index >= total && t - pluginAt > 2.0))) {
-				d += std::format(" · {} {}", activity->count, activity->noun);
+				d += std::format(" · {} 个{}", activity->count, ChineseNoun(activity->noun));
 			}
 			if (!file.empty() && t - fileAt < 1.5) {
-				d += " · file: " + file;
+				d += " · 文件：" + file;
 			}
 		}
 		head = Wide(h);
@@ -1091,7 +1125,7 @@ namespace
 		}
 		// A normal app window, so it is in the taskbar and alt-tab (Wine leaves NOACTIVATE windows out of both).
 		// WS_MINIMIZEBOX tells the window manager (via Wine's Motif hints) that it may be minimized.
-		splash = CreateWindowExW(WS_EX_APPWINDOW | (pictureAlpha ? WS_EX_LAYERED : 0), ClassName, L"Skyrim startup", WS_POPUP | WS_MINIMIZEBOX, splashAt.x,
+		splash = CreateWindowExW(WS_EX_APPWINDOW | (pictureAlpha ? WS_EX_LAYERED : 0), ClassName, L"Skyrim 启动中", WS_POPUP | WS_MINIMIZEBOX, splashAt.x,
 			splashAt.y, size.cx, size.cy, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
 		if (!splash) {
 			logger::error("CreateWindowEx (splash) failed ({})", GetLastError());
@@ -1249,16 +1283,16 @@ namespace
 		}
 		std::string h;
 		if (a_s.saveSize && a_s.saveRead < a_s.saveSize) {
-			h = std::format("Reading save {:.1f}/{:.1f} MB", a_s.saveRead / 1048576.0, a_s.saveSize / 1048576.0);
+			h = std::format("正在读取存档 {:.1f}/{:.1f} MB", a_s.saveRead / 1048576.0, a_s.saveSize / 1048576.0);
 		} else {
-			h = a_s.cell.empty() ? "Loading"s : "Loading " + a_s.cell;
+			h = a_s.cell.empty() ? "正在加载"s : "正在加载 " + a_s.cell;
 		}
-		std::string d = std::format("{:.0f}s", a_now - a_s.startedAt);
+		std::string d = std::format("已用 {:.0f} 秒", a_now - a_s.startedAt);
 		if (!file.empty() && a_now - fileAt < 1.5) {
-			d += " · " + file;
+			d += " · 文件：" + file;
 		}
 		if (mainBusy.IsPlugin()) {
-			d += " · " + mainBusy.shown + " running";
+			d += " · " + mainBusy.shown + " 正在运行";
 		}
 		head = Wide(h);
 		detail = Wide(d);

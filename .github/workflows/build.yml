@@ -1,0 +1,95 @@
+name: Build SkyLine
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "plugin/**"
+      - "config/**"
+      - "README.md"
+      - ".github/workflows/build.yml"
+  pull_request:
+    paths:
+      - "plugin/**"
+      - "config/**"
+      - "README.md"
+      - ".github/workflows/build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Windows x64 plugin
+    runs-on: windows-2022
+    env:
+      VCPKG_ROOT: ${{ github.workspace }}\\vcpkg
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Cache vcpkg
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}/vcpkg
+            ${{ github.workspace }}/plugin/vcpkg_installed
+          key: ${{ runner.os }}-${{ runner.arch }}-vcpkg-${{ hashFiles('plugin/vcpkg.json') }}
+
+      - name: Bootstrap vcpkg
+        shell: pwsh
+        run: |
+          if (!(Test-Path "$env:VCPKG_ROOT\\vcpkg.exe")) {
+            git clone --depth 1 https://github.com/microsoft/vcpkg.git "$env:VCPKG_ROOT"
+            & "$env:VCPKG_ROOT\\bootstrap-vcpkg.bat" -disableMetrics
+          }
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          & "$env:VCPKG_ROOT\\vcpkg.exe" install --triplet x64-windows-static --x-manifest-root="$env:GITHUB_WORKSPACE\\plugin"
+
+      - name: Configure CMake
+        shell: pwsh
+        run: |
+          cmake -S plugin -B build -G "Visual Studio 17 2022" -A x64 "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows-static
+
+      - name: Build Release
+        shell: pwsh
+        run: |
+          cmake --build build --config Release --parallel
+
+      - name: Package plugin
+        shell: pwsh
+        run: |
+          $package = Join-Path $env:RUNNER_TEMP "SkyLine"
+          $plugins = Join-Path $package "SKSE\\Plugins"
+          New-Item -ItemType Directory -Path $plugins -Force | Out-Null
+
+          $dll = Join-Path $env:GITHUB_WORKSPACE "build\\Release\\SkyLine.dll"
+          if (!(Test-Path $dll)) {
+            throw "Build output not found: $dll"
+          }
+
+          Copy-Item -LiteralPath $dll -Destination $plugins
+          Copy-Item -LiteralPath "config\\SkyLine.ini" -Destination $plugins
+          Copy-Item -LiteralPath "config\\SkyLineSplash.jpg" -Destination $plugins
+
+          $archive = Join-Path $env:RUNNER_TEMP "SkyLine-${{ github.sha }}.zip"
+          Compress-Archive -Path (Join-Path $package "*") -DestinationPath $archive -CompressionLevel Optimal -Force
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SkyLine-${{ github.sha }}
+          path: ${{ runner.temp }}/SkyLine-${{ github.sha }}.zip
+          if-no-files-found: error
+          retention-days: 14
