@@ -12,7 +12,7 @@ diff --git a/include/RE/G/GHashSetBase.h b/include/RE/G/GHashSetBase.h
 diff --git a/include/RE/B/BSTPointerAndFlags.h b/include/RE/B/BSTPointerAndFlags.h
 --- a/include/RE/B/BSTPointerAndFlags.h
 +++ b/include/RE/B/BSTPointerAndFlags.h
-@@ -43,7 +43,7 @@
+@@ -43,8 +43,8 @@
  			if (this != std::addressof(a_rhs)) {
  				clear_flags();
  				a_rhs.clear_flags();

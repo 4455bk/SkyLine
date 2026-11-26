@@ -48,7 +48,7 @@ jobs:
           path: |
             ${{ github.workspace }}/vcpkg
             ${{ github.workspace }}/plugin/vcpkg_installed
-          key: ${{ runner.os }}-${{ runner.arch }}-vcpkg-${{ hashFiles('plugin/vcpkg.json', 'plugin/vcpkg-configuration.json') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-vcpkg-${{ hashFiles('plugin/vcpkg.json', 'plugin/vcpkg-configuration.json', 'plugin/overlays/ports/**') }}
 
       - name: Bootstrap pinned vcpkg
         shell: pwsh
