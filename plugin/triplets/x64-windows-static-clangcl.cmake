@@ -1,6 +1,5 @@
-# Static x64 Windows libraries built with clang-cl, as required by SkyLine's
-# musttail hooks and CommonLibSSE-NG build configuration.
+# Static x64 Windows libraries built with clang-cl.
 set(VCPKG_TARGET_ARCHITECTURE x64)
 set(VCPKG_CRT_LINKAGE static)
 set(VCPKG_LIBRARY_LINKAGE static)
-set(VCPKG_PLATFORM_TOOLSET ClangCL)
+set(VCPKG_CHAINLOAD_TOOLCHAIN_FILE "${CMAKE_CURRENT_LIST_DIR}/../toolchains/clang-cl.cmake")
