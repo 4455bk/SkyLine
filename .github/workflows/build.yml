@@ -25,7 +25,7 @@ jobs:
     name: Build Windows x64 plugin
     runs-on: windows-2022
     env:
-      VCPKG_ROOT: ${{ github.workspace }}\\vcpkg
+      VCPKG_HOME: ${{ github.workspace }}/vcpkg
 
     steps:
       - name: Checkout source
@@ -42,25 +42,28 @@ jobs:
           path: |
             ${{ github.workspace }}/vcpkg
             ${{ github.workspace }}/plugin/vcpkg_installed
-          key: ${{ runner.os }}-${{ runner.arch }}-vcpkg-${{ hashFiles('plugin/vcpkg.json') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-vcpkg-${{ hashFiles('plugin/vcpkg.json', 'plugin/vcpkg-configuration.json') }}
 
-      - name: Bootstrap vcpkg
+      - name: Bootstrap pinned vcpkg
         shell: pwsh
         run: |
-          if (!(Test-Path "$env:VCPKG_ROOT\\vcpkg.exe")) {
-            git clone --depth 1 https://github.com/microsoft/vcpkg.git "$env:VCPKG_ROOT"
-            & "$env:VCPKG_ROOT\\bootstrap-vcpkg.bat" -disableMetrics
+          if (!(Test-Path "$env:VCPKG_HOME/vcpkg.exe")) {
+            git init "$env:VCPKG_HOME"
+            git -C "$env:VCPKG_HOME" remote add origin https://github.com/microsoft/vcpkg.git
+            git -C "$env:VCPKG_HOME" fetch --depth 1 origin 175007f70fdc66f6e7de4174a135b4082ba10703
+            git -C "$env:VCPKG_HOME" checkout --detach FETCH_HEAD
+            & "$env:VCPKG_HOME/bootstrap-vcpkg.bat" -disableMetrics
           }
 
       - name: Install dependencies
         shell: pwsh
         run: |
-          & "$env:VCPKG_ROOT\\vcpkg.exe" install --triplet x64-windows-static --x-manifest-root="$env:GITHUB_WORKSPACE\\plugin"
+          & "$env:VCPKG_HOME/vcpkg.exe" install --triplet x64-windows-static --x-manifest-root="$env:GITHUB_WORKSPACE/plugin"
 
       - name: Configure CMake
         shell: pwsh
         run: |
-          cmake -S plugin -B build -G "Visual Studio 17 2022" -A x64 "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows-static
+          cmake -S plugin -B build -G "Visual Studio 17 2022" -A x64 "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_HOME/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows-static
 
       - name: Build Release
         shell: pwsh
@@ -71,17 +74,17 @@ jobs:
         shell: pwsh
         run: |
           $package = Join-Path $env:RUNNER_TEMP "SkyLine"
-          $plugins = Join-Path $package "SKSE\\Plugins"
+          $plugins = Join-Path $package "SKSE/Plugins"
           New-Item -ItemType Directory -Path $plugins -Force | Out-Null
 
-          $dll = Join-Path $env:GITHUB_WORKSPACE "build\\Release\\SkyLine.dll"
+          $dll = Join-Path $env:GITHUB_WORKSPACE "build/Release/SkyLine.dll"
           if (!(Test-Path $dll)) {
             throw "Build output not found: $dll"
           }
 
           Copy-Item -LiteralPath $dll -Destination $plugins
-          Copy-Item -LiteralPath "config\\SkyLine.ini" -Destination $plugins
-          Copy-Item -LiteralPath "config\\SkyLineSplash.jpg" -Destination $plugins
+          Copy-Item -LiteralPath "config/SkyLine.ini" -Destination $plugins
+          Copy-Item -LiteralPath "config/SkyLineSplash.jpg" -Destination $plugins
 
           $archive = Join-Path $env:RUNNER_TEMP "SkyLine-${{ github.sha }}.zip"
           Compress-Archive -Path (Join-Path $package "*") -DestinationPath $archive -CompressionLevel Optimal -Force

@@ -1,5 +1,9 @@
 {
   "name": "skyline",
   "version-string": "1.5.0",
-  "dependencies": ["commonlibsse-ng", "spdlog"]
+  "dependencies": [
+    "commonlibsse-ng",
+    "spdlog"
+  ],
+  "builtin-baseline": "175007f70fdc66f6e7de4174a135b4082ba10703"
 }
